@@ -1,3 +1,4 @@
+// server.js
 import express from 'express';
 import mongoose from 'mongoose';
 import cors from 'cors';
@@ -7,25 +8,27 @@ import bcrypt from 'bcryptjs';
 const app = express();
 const PORT = 3000;
 
-const JWT_SECRET = '123'; // Use environment variables in production
+// JWT secret key (keep this secret, use env vars in production)
+const JWT_SECRET = '123';
+
+// MongoDB connection string
 const DB_URI = "mongodb+srv://123:123@cluster0.kwwd9ao.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0";
 
+// Enable CORS
 app.use(cors());
+
+// Parse JSON bodies
 app.use(express.json());
 
-// Connect MongoDB
-mongoose.connect(DB_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-  serverSelectionTimeoutMS: 5000
-})
-.then(() => console.log('✅ Connected to MongoDB'))
-.catch(err => {
-  console.error('❌ MongoDB connection error:', err);
-  process.exit(1);
-});
+// Connect to MongoDB
+mongoose.connect(DB_URI)
+  .then(() => console.log('✅ Connected to MongoDB'))
+  .catch(err => {
+    console.error('❌ MongoDB connection error:', err);
+    process.exit(1);
+  });
 
-// User Schema
+// User Schema and Model
 const userSchema = new mongoose.Schema({
   username: String,
   name: String,
@@ -37,7 +40,15 @@ const userSchema = new mongoose.Schema({
 
 const User = mongoose.model('User', userSchema);
 
-// JWT middleware
+// AddCard Schema and Model
+const addCardSchema = new mongoose.Schema({
+  title: { type: String, required: true, trim: true },
+  description: { type: String, required: true }
+}, { timestamps: true });
+
+const AddCard = mongoose.model('AddCard', addCardSchema);
+
+// JWT Authentication Middleware
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
@@ -50,13 +61,17 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-// Admin role middleware
+// Admin Authorization Middleware
 const authorizeAdmin = (req, res, next) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Access denied. Admins only.' });
   }
   next();
 };
+
+// ===============
+// API Routes
+// ===============
 
 // Check if email exists
 app.get('/users/check-email', async (req, res) => {
@@ -71,11 +86,10 @@ app.get('/users/check-email', async (req, res) => {
   }
 });
 
-// User registration (hashed password) - ADMIN ROLE PREVENTED
+// Register new user
 app.post('/users', async (req, res) => {
   try {
     const { username, name, email, password, age } = req.body;
-
     if (!username || !name || !email || !password) {
       return res.status(400).json({ error: 'Username, name, email, and password are required' });
     }
@@ -87,40 +101,34 @@ app.post('/users', async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Force role to 'user' - prevents admin creation through API
     const newUser = new User({
       username,
       name,
       email: email.toLowerCase(),
       password: hashedPassword,
       age,
-      role: 'user' // Hardcoded - cannot be set to admin via API
+      role: 'user'
     });
 
     await newUser.save();
+
     res.status(201).json({ message: 'User registered successfully' });
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: 'Failed to register user' });
   }
 });
 
-// Login (hashed password check)
+// Login
 app.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password required' });
-    }
+    if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
 
     const user = await User.findOne({ email: email.toLowerCase() });
     if (!user) return res.status(401).json({ error: 'Invalid email or password' });
 
     const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
-      return res.status(401).json({ error: 'Invalid email or password' });
-    }
+    if (!isMatch) return res.status(401).json({ error: 'Invalid email or password' });
 
     const payload = { id: user._id, email: user.email, role: user.role };
     const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '1h' });
@@ -142,7 +150,7 @@ app.post('/login', async (req, res) => {
   }
 });
 
-// Get users (only users and managers)
+// Get all users with role user or manager (protected)
 app.get('/users', authenticateToken, async (req, res) => {
   try {
     const users = await User.find({ role: { $in: ['user', 'manager'] } }).select('-__v -password');
@@ -152,7 +160,7 @@ app.get('/users', authenticateToken, async (req, res) => {
   }
 });
 
-// Delete user - only admin
+// Delete user by ID (admin only)
 app.delete('/users/:id', authenticateToken, authorizeAdmin, async (req, res) => {
   try {
     const { id } = req.params;
@@ -164,47 +172,36 @@ app.delete('/users/:id', authenticateToken, authorizeAdmin, async (req, res) => 
 
     res.json({ message: 'User deleted successfully' });
   } catch (err) {
-    console.error('Delete error:', err);
     res.status(500).json({ error: 'Failed to delete user' });
   }
 });
 
-// Update user - only admin (WITH ADMIN ROLE PROTECTION AND PASSWORD HASHING)
+// Update user by ID (admin only)
 app.put('/users/:id', authenticateToken, authorizeAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { username, name, email, age, role, password } = req.body;
 
-    // Validate role
     const allowedRoles = ['user', 'manager', 'admin'];
     if (role && !allowedRoles.includes(role)) {
       return res.status(400).json({ error: 'Invalid role' });
     }
 
-    // Fetch current user from database
     const currentUser = await User.findById(id);
     if (!currentUser) {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    // Prevent admin role modifications via API
+    // Prevent assigning or removing admin role via API
     if (role) {
-      // Block changing TO admin
       if (role === 'admin' && currentUser.role !== 'admin') {
-        return res.status(403).json({ 
-          error: 'Cannot assign admin role via API. Must update database manually.' 
-        });
+        return res.status(403).json({ error: 'Cannot assign admin role via API. Update database manually.' });
       }
-      
-      // Block changing FROM admin
       if (currentUser.role === 'admin' && role !== 'admin') {
-        return res.status(403).json({ 
-          error: 'Cannot remove admin role via API. Must update database manually.' 
-        });
+        return res.status(403).json({ error: 'Cannot remove admin role via API. Update database manually.' });
       }
     }
 
-    // Check email uniqueness
     if (email) {
       const emailUser = await User.findOne({ email: email.toLowerCase() });
       if (emailUser && emailUser._id.toString() !== id) {
@@ -212,20 +209,11 @@ app.put('/users/:id', authenticateToken, authorizeAdmin, async (req, res) => {
       }
     }
 
-    // Prepare update data
-    const updateData = {
-      username,
-      name,
-      age,
-      role,
-    };
-
+    const updateData = { username, name, age, role };
     if (email) updateData.email = email.toLowerCase();
 
-    // Handle password hashing if password is provided and not empty
     if (password && password.trim() !== '') {
-      const hashedPassword = await bcrypt.hash(password, 10);
-      updateData.password = hashedPassword;
+      updateData.password = await bcrypt.hash(password, 10);
     }
 
     const updatedUser = await User.findByIdAndUpdate(id, updateData, {
@@ -237,22 +225,36 @@ app.put('/users/:id', authenticateToken, authorizeAdmin, async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    // Don't send password back in response
     const userResponse = updatedUser.toObject();
     delete userResponse.password;
     delete userResponse.__v;
 
     res.json({ message: 'User updated successfully', user: userResponse });
   } catch (err) {
-    console.error('Update error:', err);
     res.status(500).json({ error: 'Failed to update user' });
   }
 });
 
-// Admin routes (admins only)
-app.use('/admin', authenticateToken, authorizeAdmin);
+// Create AddCard (admin only)
+app.post('/addcards', authenticateToken, authorizeAdmin, async (req, res) => {
+  try {
+    const { title, description } = req.body;
+    if (!title || !description) {
+      return res.status(400).json({ error: 'Title and description are required' });
+    }
+    const newAddCard = new AddCard({ title, description });
+    await newAddCard.save();
+    res.status(201).json({ message: 'AddCard created successfully', addCard: newAddCard });
+  } catch (error) {
+    console.error('Failed to create AddCard:', error);
+    res.status(500).json({ error: 'Failed to create AddCard' });
+  }
+});
 
-app.get('/admin/admins', async (req, res) => {
+
+
+// Get all admins (protected)
+app.get('/admin/admins', authenticateToken, authorizeAdmin, async (req, res) => {
   try {
     const admins = await User.find({ role: 'admin' }).select('-__v -password');
     res.json(admins);
@@ -261,16 +263,26 @@ app.get('/admin/admins', async (req, res) => {
   }
 });
 
-app.get('/admin/data', (req, res) => {
-  res.json({ secretAdminData: 'This is admin only!' });
-});
 
-// Profile
-app.get('/profile', authenticateToken, (req, res) => {
-  res.json({ message: 'Welcome to your profile', user: req.user });
-});
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // Start server
 app.listen(PORT, () => {
-  console.log(`🚀 Server running at http://localhost:${PORT}`);
+  console.log(`Server running on http://localhost:${PORT}`);
 });
