@@ -266,9 +266,18 @@ app.get('/admin/admins', authenticateToken, authorizeAdmin, async (req, res) => 
 
 
 
+// Fetch all AddCards
+export const getAllAddCards = async (req, res) => {
+  try {
+    const addCards = await AddCard.find().sort({ createdAt: -1 }); // newest first
+    res.json(addCards);
+  } catch (error) {
+    console.error('Failed to fetch AddCards:', error);
+    res.status(500).json({ error: 'Failed to fetch AddCards' });
+  }
+};
 
-
-
+app.get('/addcards', authenticateToken, getAllAddCards);
 
 
 
